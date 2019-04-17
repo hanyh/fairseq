@@ -13,8 +13,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from fairseq.modules import (
-    DownsampledMultiHeadAttention, GradMultiply, LearnedPositionalEmbedding,
-    LinearizedConvolution,
+    DownsampledMultiHeadAttention, GradMultiply, LayerNorm,
+    LearnedPositionalEmbedding, LinearizedConvolution,
 )
 from fairseq import utils
 
@@ -140,12 +140,11 @@ class FConvEncoder(FairseqEncoder):
     def __init__(
         self, dictionary, embed_dim=512, max_positions=1024,
         convolutions=((512, 3),) * 20, dropout=0.1, attention=False,
-        attention_nheads=1, left_pad=True,
+        attention_nheads=1,
     ):
         super().__init__(dictionary)
         self.dropout = dropout
         self.num_attention_layers = None
-        self.left_pad = left_pad
 
         num_embeddings = len(dictionary)
         self.padding_idx = dictionary.pad()
@@ -154,7 +153,6 @@ class FConvEncoder(FairseqEncoder):
             max_positions,
             embed_dim,
             self.padding_idx,
-            left_pad=self.left_pad,
         )
 
         def expand_bool_array(val):
@@ -195,12 +193,19 @@ class FConvEncoder(FairseqEncoder):
         # project to size of convolution
         x = self.fc1(x)
 
+        encoder_padding_mask = src_tokens.eq(self.padding_idx).t()  # -> T x B
+        if not encoder_padding_mask.any():
+            encoder_padding_mask = None
+
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
 
         # temporal convolutions
         for proj, conv, attention in zip(self.projections, self.convolutions, self.attention):
             residual = x if proj is None else proj(x)
+
+            if encoder_padding_mask is not None:
+                x = x.masked_fill(encoder_padding_mask.unsqueeze(-1), 0)
 
             x = F.dropout(x, p=self.dropout, training=self.training)
             padding_l = (conv.kernel_size[0] - 1) // 2
@@ -218,6 +223,10 @@ class FConvEncoder(FairseqEncoder):
         # project back to size of embedding
         x = self.fc2(x)
 
+        if encoder_padding_mask is not None:
+            encoder_padding_mask = encoder_padding_mask.t()  # -> B x T
+            x = x.masked_fill(encoder_padding_mask.unsqueeze(-1), 0)
+
         # scale gradients (this only affects backward, not forward)
         x = GradMultiply.apply(x, 1.0 / (2.0 * self.num_attention_layers))
 
@@ -226,12 +235,17 @@ class FConvEncoder(FairseqEncoder):
 
         return {
             'encoder_out': (x, y),
+            'encoder_padding_mask': encoder_padding_mask,  # B x T
         }
 
     def reorder_encoder_out(self, encoder_out, new_order):
         encoder_out['encoder_out'] = tuple(
             eo.index_select(0, new_order) for eo in encoder_out['encoder_out']
         )
+
+        if encoder_out['encoder_padding_mask'] is not None:
+            encoder_out['encoder_padding_mask'] = \
+                encoder_out['encoder_padding_mask'].index_select(0, new_order)
 
         if 'pretrained' in encoder_out:
             encoder_out['pretrained']['encoder_out'] = tuple(
@@ -253,14 +267,13 @@ class FConvDecoder(FairseqDecoder):
         convolutions=((512, 3),) * 8, attention=True, dropout=0.1,
         selfattention=False, attention_nheads=1, selfattention_nheads=1,
         project_input=False, gated_attention=False, downsample=False,
-        pretrained=False, trained_decoder=None, left_pad=False,
+        pretrained=False, trained_decoder=None,
     ):
         super().__init__(dictionary)
         self.register_buffer('version', torch.Tensor([2]))
         self.pretrained = pretrained
         self.pretrained_decoder = trained_decoder
         self.dropout = dropout
-        self.left_pad = left_pad
         self.need_attn = True
         in_channels = convolutions[0][0]
 
@@ -285,7 +298,6 @@ class FConvDecoder(FairseqDecoder):
             max_positions,
             embed_dim,
             padding_idx,
-            left_pad=self.left_pad,
         )
 
         self.fc1 = Linear(embed_dim, in_channels, dropout=dropout)
@@ -335,13 +347,13 @@ class FConvDecoder(FairseqDecoder):
             # pretrained and trained models are joined
             self.joining = nn.Sequential(
                 Linear(out_embed_dim*2, out_embed_dim*2),
-                nn.LayerNorm(out_embed_dim*2),
+                LayerNorm(out_embed_dim*2),
                 nn.GLU(),
                 Linear(out_embed_dim, out_embed_dim*2),
-                nn.LayerNorm(out_embed_dim*2),
+                LayerNorm(out_embed_dim*2),
                 nn.GLU(),
                 Linear(out_embed_dim, out_embed_dim),
-                nn.LayerNorm(out_embed_dim)
+                LayerNorm(out_embed_dim)
             )
             # pretrained model contains an output layer that is nhid -> vocab size
             # but the models are combined in their hidden state
@@ -454,7 +466,7 @@ class SelfAttention(nn.Module):
         self.in_proj_q = Linear(out_channels, embed_dim)
         self.in_proj_k = Linear(out_channels, embed_dim)
         self.in_proj_v = Linear(out_channels, embed_dim)
-        self.ln = nn.LayerNorm(out_channels)
+        self.ln = LayerNorm(out_channels)
 
     def forward(self, x):
         residual = x
@@ -471,8 +483,8 @@ def Embedding(num_embeddings, embedding_dim, padding_idx):
     return m
 
 
-def PositionalEmbedding(num_embeddings, embedding_dim, padding_idx, left_pad):
-    m = LearnedPositionalEmbedding(num_embeddings, embedding_dim, padding_idx, left_pad)
+def PositionalEmbedding(num_embeddings, embedding_dim, padding_idx):
+    m = LearnedPositionalEmbedding(num_embeddings, embedding_dim, padding_idx)
     m.weight.data.normal_(0, 0.1)
     return m
 

@@ -50,6 +50,7 @@ class Trainer(object):
         self._num_updates = 0
         self._optim_history = None
         self._optimizer = None
+        self._prev_grad_norm = None
         self._wrapped_model = None
 
         self.init_meters(args)
@@ -92,7 +93,7 @@ class Trainer(object):
     @property
     def lr_scheduler(self):
         if self._lr_scheduler is None:
-            self._lr_scheduler = lr_scheduler.build_lr_scheduler(self.args, self.optimizer)
+            self._build_optimizer()  # this will initialize self._lr_scheduler
         return self._lr_scheduler
 
     def _build_optimizer(self):
@@ -110,12 +111,16 @@ class Trainer(object):
                 print('| NOTICE: your device may support faster training with --fp16')
             self._optimizer = optim.build_optimizer(self.args, params)
 
+        # We should initialize the learning rate scheduler immediately after
+        # building the optimizer, so that the initial learning rate is set.
+        self._lr_scheduler = lr_scheduler.build_lr_scheduler(self.args, self.optimizer)
+
     def save_checkpoint(self, filename, extra_state):
         """Save all training state in a checkpoint file."""
         if distributed_utils.is_master(self.args):  # only save one checkpoint
             extra_state['train_meters'] = self.meters
             utils.save_state(
-                filename, self.args, self.get_model(), self.criterion, self.optimizer,
+                filename, self.args, self.get_model().state_dict(), self.criterion, self.optimizer,
                 self.lr_scheduler, self._num_updates, self._optim_history, extra_state,
             )
 
@@ -154,14 +159,9 @@ class Trainer(object):
 
     def train_step(self, samples, dummy_batch=False):
         """Do forward, backward and parameter update."""
-        # Set seed based on args.seed and the update number so that we get
-        # reproducible results when resuming from checkpoints
-        seed = self.args.seed + self.get_num_updates()
-        torch.manual_seed(seed)
-        if self.cuda:
-            torch.cuda.manual_seed(seed)
-
+        self._set_seed()
         self.model.train()
+        self.criterion.train()
         self.zero_grad()
 
         if not dummy_batch:
@@ -202,7 +202,7 @@ class Trainer(object):
                     sample_sizes.append(sample_size)
             except RuntimeError as e:
                 if 'out of memory' in str(e):
-                    print('| WARNING: ran out of memory, skipping batch')
+                    print(('| WARNING: ran out of memory with exception: {};\n Skipping batch').format(str(e)))
                     ooms += 1
                     self.zero_grad()
                 else:
@@ -216,12 +216,15 @@ class Trainer(object):
 
         # gather logging outputs from all replicas
         if self.args.distributed_world_size > 1:
-            logging_outputs, sample_sizes, ooms = zip(*distributed_utils.all_gather_list(
-                [logging_outputs, sample_sizes, ooms],
-            ))
+            logging_outputs, sample_sizes, ooms, prev_norms = \
+                zip(*distributed_utils.all_gather_list(
+                    [logging_outputs, sample_sizes, ooms, self._prev_grad_norm],
+                ))
             logging_outputs = list(chain.from_iterable(logging_outputs))
             sample_sizes = list(chain.from_iterable(sample_sizes))
             ooms = sum(ooms)
+            assert all(norm == prev_norms[0] for norm in prev_norms), \
+                'Fatal error: gradients are inconsistent between workers'
 
         self.meters['oom'].update(ooms, len(samples))
         if ooms == self.args.distributed_world_size * len(samples):
@@ -247,6 +250,7 @@ class Trainer(object):
 
             # clip grads
             grad_norm = self.optimizer.clip_grad_norm(self.args.clip_norm)
+            self._prev_grad_norm = grad_norm
 
             # take an optimization step
             self.optimizer.step()
@@ -254,6 +258,9 @@ class Trainer(object):
 
             # update learning rate
             self.lr_scheduler.step_update(self._num_updates)
+
+            # task specific update per step
+            self.task.update_step(self._num_updates)
 
             # update meters
             ntokens = logging_output.get('ntokens', 0)
@@ -267,6 +274,10 @@ class Trainer(object):
                 1. if grad_norm > self.args.clip_norm and self.args.clip_norm > 0 else 0.
             )
             self.meters['train_loss'].update(logging_output.get('loss', 0), sample_size)
+            if 'train_acc' in self.meters:
+                self.meters['train_acc'].update(
+                    logging_output.get('acc', 0), sample_size)
+
             if 'nll_loss' in logging_output:
                 self.meters['train_nll_loss'].update(logging_output.get('nll_loss', 0), ntokens)
         except OverflowError as e:
@@ -286,6 +297,7 @@ class Trainer(object):
         """Do forward pass in evaluation mode."""
         with torch.no_grad():
             self.model.eval()
+            self.criterion.eval()
 
             sample = self._prepare_sample(sample)
             if sample is None:
@@ -335,6 +347,10 @@ class Trainer(object):
         # update meters for validation
         ntokens = logging_output.get('ntokens', 0)
         self.meters['valid_loss'].update(logging_output.get('loss', 0), sample_size)
+        if 'valid_acc' in self.meters:
+            self.meters['valid_acc'].update(
+                logging_output.get('acc', 0), sample_size)
+
         if 'nll_loss' in logging_output:
             self.meters['valid_nll_loss'].update(logging_output.get('nll_loss', 0), ntokens)
 
@@ -389,3 +405,11 @@ class Trainer(object):
         if self.cuda:
             sample = utils.move_to_cuda(sample)
         return sample
+
+    def _set_seed(self):
+        # Set seed based on args.seed and the update number so that we get
+        # reproducible results when resuming from checkpoints
+        seed = self.args.seed + self.get_num_updates()
+        torch.manual_seed(seed)
+        if self.cuda:
+            torch.cuda.manual_seed(seed)

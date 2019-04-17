@@ -145,6 +145,11 @@ class MultiheadAttention(nn.Module):
 
         src_len = k.size(1)
 
+        # This is part of a workaround to get around fork/join parallelism
+        # not supporting Optional types.
+        if key_padding_mask is not None and key_padding_mask.shape == torch.Size([]):
+            key_padding_mask = None
+
         if key_padding_mask is not None:
             assert key_padding_mask.size(0) == bsz
             assert key_padding_mask.size(1) == src_len
@@ -184,7 +189,9 @@ class MultiheadAttention(nn.Module):
                 ).type_as(attn_weights)  # FP16 support: cast to float and back
             attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
 
-        attn_weights = F.softmax(attn_weights.float(), dim=-1).type_as(attn_weights)
+        attn_weights = utils.softmax(
+            attn_weights, dim=-1, onnx_trace=self.onnx_trace,
+        ).type_as(attn_weights)
         attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
 
         attn = torch.bmm(attn_weights, v)

@@ -5,7 +5,7 @@ First, download a pre-trained model along with its vocabularies:
 
 .. code-block:: console
 
-    > curl https://s3.amazonaws.com/fairseq-py/models/wmt14.v2.en-fr.fconv-py.tar.bz2 | tar xvjf -
+    > curl https://dl.fbaipublicfiles.com/fairseq/models/wmt14.v2.en-fr.fconv-py.tar.bz2 | tar xvjf -
 
 This model uses a `Byte Pair Encoding (BPE)
 vocabulary <https://arxiv.org/abs/1508.07909>`__, so we'll have to apply
@@ -15,17 +15,17 @@ done with the
 script using the ``wmt14.en-fr.fconv-cuda/bpecodes`` file. ``@@`` is
 used as a continuation marker and the original text can be easily
 recovered with e.g. ``sed s/@@ //g`` or by passing the ``--remove-bpe``
-flag to :ref:`generate.py`. Prior to BPE, input text needs to be tokenized
+flag to :ref:`fairseq-generate`. Prior to BPE, input text needs to be tokenized
 using ``tokenizer.perl`` from
 `mosesdecoder <https://github.com/moses-smt/mosesdecoder>`__.
 
-Let's use :ref:`interactive.py` to generate translations
+Let's use :ref:`fairseq-interactive` to generate translations
 interactively. Here, we use a beam size of 5:
 
 .. code-block:: console
 
     > MODEL_DIR=wmt14.en-fr.fconv-py
-    > python interactive.py \
+    > fairseq-interactive \
         --path $MODEL_DIR/model.pt $MODEL_DIR \
         --beam 5 --source-lang en --target-lang fr
     | loading model(s) from wmt14.en-fr.fconv-py/model.pt
@@ -66,7 +66,7 @@ datasets: IWSLT 2014 (German-English), WMT 2014 (English-French) and WMT
     > bash prepare-iwslt14.sh
     > cd ../..
     > TEXT=examples/translation/iwslt14.tokenized.de-en
-    > python preprocess.py --source-lang de --target-lang en \
+    > fairseq-preprocess --source-lang de --target-lang en \
         --trainpref $TEXT/train --validpref $TEXT/valid --testpref $TEXT/test \
         --destdir data-bin/iwslt14.tokenized.de-en
 
@@ -76,17 +76,17 @@ This will write binarized data that can be used for model training to
 Training
 --------
 
-Use :ref:`train.py` to train a new model. Here a few example settings that work
+Use :ref:`fairseq-train` to train a new model. Here a few example settings that work
 well for the IWSLT 2014 dataset:
 
 .. code-block:: console
 
     > mkdir -p checkpoints/fconv
-    > CUDA_VISIBLE_DEVICES=0 python train.py data-bin/iwslt14.tokenized.de-en \
+    > CUDA_VISIBLE_DEVICES=0 fairseq-train data-bin/iwslt14.tokenized.de-en \
         --lr 0.25 --clip-norm 0.1 --dropout 0.2 --max-tokens 4000 \
         --arch fconv_iwslt_de_en --save-dir checkpoints/fconv
 
-By default, :ref:`train.py` will use all available GPUs on your machine. Use the
+By default, :ref:`fairseq-train` will use all available GPUs on your machine. Use the
 ``CUDA_VISIBLE_DEVICES`` environment variable to select specific GPUs and/or to
 change the number of GPU devices that will be used.
 
@@ -98,12 +98,12 @@ Generation
 ----------
 
 Once your model is trained, you can generate translations using
-:ref:`generate.py` **(for binarized data)** or
-:ref:`interactive.py` **(for raw text)**:
+:ref:`fairseq-generate` **(for binarized data)** or
+:ref:`fairseq-interactive` **(for raw text)**:
 
 .. code-block:: console
 
-    > python generate.py data-bin/iwslt14.tokenized.de-en \
+    > fairseq-generate data-bin/iwslt14.tokenized.de-en \
         --path checkpoints/fconv/checkpoint_best.pt \
         --batch-size 128 --beam 5
     | [de] dictionary: 35475 types
@@ -136,7 +136,7 @@ to training on 8 GPUs:
 
 .. code-block:: console
 
-    > CUDA_VISIBLE_DEVICES=0 python train.py --update-freq 8 (...)
+    > CUDA_VISIBLE_DEVICES=0 fairseq-train --update-freq 8 (...)
 
 Training with half precision floating point (FP16)
 --------------------------------------------------
@@ -152,53 +152,37 @@ Fairseq supports FP16 training with the ``--fp16`` flag:
 
 .. code-block:: console
 
-    > python train.py --fp16 (...)
+    > fairseq-train --fp16 (...)
+
+Lazily loading large training datasets
+--------------------------------------
+
+By default fairseq loads the entire training set into system memory. For large
+datasets, the ``--lazy-load`` option can be used to instead load batches on-demand.
+For optimal performance, use the ``--num-workers`` option to control the number
+of background processes that will load batches.
 
 Distributed training
 --------------------
 
-Distributed training in fairseq is implemented on top of
-`torch.distributed <http://pytorch.org/docs/master/distributed.html>`__.
-Training begins by launching one worker process per GPU. These workers
-discover each other via a unique host and port (required) that can be
-used to establish an initial connection. Additionally, each worker has a
-rank, that is a unique number from 0 to n-1 where n is the total number
-of GPUs.
+Distributed training in fairseq is implemented on top of ``torch.distributed``.
+The easiest way to launch jobs is with the `torch.distributed.launch
+<https://pytorch.org/docs/stable/distributed.html#launch-utility>`__ tool.
 
-If you run on a cluster managed by
-`SLURM <https://slurm.schedmd.com/>`__ you can train a large
-English-French model on the WMT 2014 dataset on 16 nodes with 8 GPUs
-each (in total 128 GPUs) using this command:
+For example, to train a large English-German Transformer model on 2 nodes each
+with 8 GPUs (in total 16 GPUs), run the following command on each node,
+replacing ``node_rank=0`` with ``node_rank=1`` on the second node:
 
 .. code-block:: console
 
-    > DATA=...   # path to the preprocessed dataset, must be visible from all nodes
-    > PORT=9218  # any available TCP port that can be used by the trainer to establish initial connection
-    > sbatch --job-name fairseq-py --gres gpu:8 --cpus-per-task 10 \
-        --nodes 16 --ntasks-per-node 8 \
-        --wrap 'srun --output train.log.node%t --error train.stderr.node%t.%j \
-        python train.py $DATA \
-        --distributed-world-size 128 \
-        --distributed-port $PORT \
-        --force-anneal 50 --lr-scheduler fixed --max-epoch 55 \
-        --arch fconv_wmt_en_fr --optimizer nag --lr 0.1,4 --max-tokens 3000 \
-        --clip-norm 0.1 --dropout 0.1 --criterion label_smoothed_cross_entropy \
-        --label-smoothing 0.1 --wd 0.0001'
-
-Alternatively you can manually start one process per GPU:
-
-.. code-block:: console
-
-    > DATA=...  # path to the preprocessed dataset, must be visible from all nodes
-    > HOST_PORT=master.example.com:9218  # one of the hosts used by the job
-    > RANK=...  # the rank of this process, from 0 to 127 in case of 128 GPUs
-    > LOCAL_RANK=... # the local rank of this process, from 0 to 7 in case of 8 GPUs per machine
-    > python train.py $DATA \
-        --distributed-world-size 128 \
-        --distributed-init-method 'tcp://$HOST_PORT' \
-        --distributed-rank $RANK \
-        --device-id $LOCAL_RANK \
-        --force-anneal 50 --lr-scheduler fixed --max-epoch 55 \
-        --arch fconv_wmt_en_fr --optimizer nag --lr 0.1,4 --max-tokens 3000 \
-        --clip-norm 0.1 --dropout 0.1 --criterion label_smoothed_cross_entropy \
-        --label-smoothing 0.1 --wd 0.0001
+    > python -m torch.distributed.launch --nproc_per_node=8 \
+        --nnodes=2 --node_rank=0 --master_addr="192.168.1.1" \
+        --master_port=1234 \
+        $(which fairseq-train) data-bin/wmt16_en_de_bpe32k \
+        --arch transformer_vaswani_wmt_en_de_big --share-all-embeddings \
+        --optimizer adam --adam-betas '(0.9, 0.98)' --clip-norm 0.0 \
+        --lr-scheduler inverse_sqrt --warmup-init-lr 1e-07 --warmup-updates 4000 \
+        --lr 0.0005 --min-lr 1e-09 \
+        --dropout 0.3 --weight-decay 0.0 --criterion label_smoothed_cross_entropy --label-smoothing 0.1 \
+        --max-tokens 3584 \
+        --fp16

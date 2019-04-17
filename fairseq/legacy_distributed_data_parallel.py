@@ -75,7 +75,6 @@ class LegacyDistributedDataParallel(nn.Module):
         self._register_grad_hook()
 
     def forward(self, *inputs, **kwargs):
-        self.need_reduction = True
         return self.module(*inputs, **kwargs)
 
     def _register_grad_hook(self):
@@ -141,6 +140,8 @@ class LegacyDistributedDataParallel(nn.Module):
             for param in self.module.parameters():
                 if not param.requires_grad:
                     continue
+                if param.grad is None:
+                    param.grad = torch.zeros_like(param)
                 if param.grad.requires_grad:
                     raise RuntimeError("DistributedDataParallel only works "
                                        "with gradients that don't require "
@@ -164,6 +165,7 @@ class LegacyDistributedDataParallel(nn.Module):
         for p in self.module.parameters():
 
             def allreduce_hook(*unused):
+                self.need_reduction = True
                 Variable._execution_engine.queue_callback(reduction_fn)
 
             if p.requires_grad:
