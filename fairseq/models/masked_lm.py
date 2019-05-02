@@ -136,7 +136,7 @@ class MaskedLMEncoder(FairseqEncoder):
         )
         encoder_normalize_before = getattr(args, 'encoder_normalize_before', False)
         use_bert_layer_norm = getattr(args, 'bert_layer_norm', False)
-        use_gelu = getattr(args, 'use_gelu', False)
+        use_gelu = getattr(args, 'gelu', False)
         apply_bert_init = getattr(args, 'apply_bert_init', False)
 
         self.sentence_encoder = TransformerSentenceEncoder(
@@ -231,11 +231,11 @@ class MaskedLMEncoder(FairseqEncoder):
 
     def upgrade_state_dict_named(self, state_dict, name):
         if isinstance(
-                self.sentence_encoder.position_embeddings,
+                self.sentence_encoder.embed_positions,
                 SinusoidalPositionalEmbedding
         ):
             state_dict[
-                name + '.sentence_encoder.position_embeddings._float_tensor'
+                name + '.sentence_encoder.embed_positions._float_tensor'
             ] = torch.FloatTensor(1)
         if not self.load_softmax:
             for k in list(state_dict.keys()):
