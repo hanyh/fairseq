@@ -1,16 +1,13 @@
-# Copyright (c) 2017-present, Facebook, Inc.
-# All rights reserved.
+# Copyright (c) Facebook, Inc. and its affiliates.
 #
-# This source code is licensed under the license found in the LICENSE file in
-# the root directory of this source tree. An additional grant of patent rights
-# can be found in the PATENTS file in the same directory.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 
 import torch
 
 from fairseq import utils
 
 from . import FairseqDataset
-from .language_pair_dataset import collate as language_pair_collate, generate_dummy_batch
 
 
 def backtranslate_samples(samples, collate_fn, generate_fn, cuda=True):
@@ -140,19 +137,6 @@ class BacktranslationDataset(FairseqDataset):
             cuda=self.cuda,
         )
         return self.output_collater(samples)
-
-    def get_dummy_batch(self, num_tokens, max_positions):
-        """Just use the tgt dataset get_dummy_batch"""
-        def collate_fn(samples):
-            return language_pair_collate(
-                samples, pad_idx=self.src_dict.pad(), eos_idx=self.src_dict.eos(),
-                input_feeding=True,
-            )
-        dummy_batch = generate_dummy_batch(
-            num_tokens, collate_fn,
-            self.src_dict, tgt_dict=self.tgt_dict)
-        dummy_batch['is_dummy'] = True
-        return dummy_batch
 
     def num_tokens(self, index):
         """Just use the tgt dataset num_tokens"""

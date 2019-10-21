@@ -1,9 +1,7 @@
-# Copyright (c) 2017-present, Facebook, Inc.
-# All rights reserved.
+# Copyright (c) Facebook, Inc. and its affiliates.
 #
-# This source code is licensed under the license found in the LICENSE file in
-# the root directory of this source tree. An additional grant of patent rights
-# can be found in the PATENTS file in the same directory.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 
 import numpy as np
 import torch
@@ -173,21 +171,6 @@ class MonolingualDataset(FairseqDataset):
                   on the right.
         """
         return collate(samples, self.vocab.pad(), self.vocab.eos())
-
-    def get_dummy_batch(self, num_tokens, max_positions, tgt_len=128):
-        """Return a dummy batch with a given number of tokens."""
-        if isinstance(max_positions, float) or isinstance(max_positions, int):
-            tgt_len = min(tgt_len, max_positions)
-        bsz = max(num_tokens // tgt_len, 1)
-        target = self.vocab.dummy_sentence(tgt_len + 2)
-        source, past_target, future_target = target[1:-1], target[2:], target[:-2]
-        source, target = self._make_source_target(source, past_target, future_target)
-        source, target = self._maybe_add_bos(source, target)
-
-        return self.collater([
-            {'id': i, 'source': source, 'target': target}
-            for i in range(bsz)
-        ])
 
     def num_tokens(self, index):
         """Return the number of tokens in a sample. This value is used to

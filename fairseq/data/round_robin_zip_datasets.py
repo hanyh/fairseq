@@ -1,9 +1,7 @@
-# Copyright (c) 2017-present, Facebook, Inc.
-# All rights reserved.
+# Copyright (c) Facebook, Inc. and its affiliates.
 #
-# This source code is licensed under the license found in the LICENSE file in
-# the root directory of this source tree. An additional grant of patent rights
-# can be found in the PATENTS file in the same directory.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 
 from collections import OrderedDict
 
@@ -43,7 +41,7 @@ class RoundRobinZipDatasets(FairseqDataset):
 
     def _map_index(self, key, index):
         assert self._ordered_indices is not None, \
-                'Must call RoundRobinZipDatasets.ordered_indices() first'
+            'Must call RoundRobinZipDatasets.ordered_indices() first'
         return self._ordered_indices[key][index % len(self.datasets[key])]
 
     def __getitem__(self, index):
@@ -71,17 +69,6 @@ class RoundRobinZipDatasets(FairseqDataset):
         else:
             # at evaluation time it's useful to pass-through batches from a single key
             return self.datasets[self.eval_key].collater(samples)
-
-    def get_dummy_batch(self, max_tokens, max_positions):
-        if self.eval_key is None:
-            # TODO should max_tokens be used independently for each batch like this?
-            return OrderedDict([
-                (key, dataset.get_dummy_batch(max_tokens, max_positions[key]))
-                for key, dataset in self.datasets.items()
-            ])
-        else:
-            # at evaluation time it's useful to return a single batch directly
-            return self.datasets[self.eval_key].get_dummy_batch(max_tokens, max_positions[self.eval_key])
 
     def num_tokens(self, index):
         """Return an example's length (number of tokens), used for batching."""
